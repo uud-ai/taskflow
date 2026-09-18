@@ -271,9 +271,10 @@
   <header class="header">
     <div class="logo">TaskFlow</div>
     <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Сменить тему">🌙</button>
+    <button class="theme-btn" id="signOutBtn" onclick="authSignOut()" title="Выйти из аккаунта" style="display:none">⏻</button>
     <button class="sync-btn pending" id="syncBtn" onclick="syncNow()">
       <div class="sync-dot"></div>
-      <span id="syncLabel">Настрой Firebase</span>
+      <span id="syncLabel">Войти для синхронизации</span>
     </button>
   </header>
 
@@ -354,6 +355,26 @@
   <div class="note-colors" id="noteColors"></div>
 </div>
 
+<!-- AUTH MODAL -->
+<div class="modal-overlay" id="authModal">
+  <div class="modal">
+    <div class="modal-title" id="authTitle">Вход</div>
+    <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px;line-height:1.5">Один аккаунт — одинаковый список задач на всех устройствах.</p>
+    <div class="modal-field"><div class="modal-label">Email</div><input class="modal-input" id="authEmail" type="email" placeholder="you@example.com" autocomplete="email" /></div>
+    <div class="modal-field"><div class="modal-label">Пароль</div><input class="modal-input" id="authPassword" type="password" placeholder="Минимум 6 символов" autocomplete="current-password" /></div>
+    <div id="authError" style="color:var(--c6);font-size:12px;margin:-6px 0 14px;display:none"></div>
+    <div class="modal-actions">
+      <button class="btn-primary" id="authSubmitBtn" onclick="authSubmit()">Войти</button>
+    </div>
+    <div style="text-align:center;margin-top:16px;font-size:13px;color:var(--text-dim)">
+      <span id="authToggleText">Нет аккаунта?</span> <a href="#" id="authToggleLink" onclick="toggleAuthMode();return false;" style="color:var(--c1);text-decoration:none">Зарегистрироваться</a>
+    </div>
+    <div style="text-align:center;margin-top:10px">
+      <a href="#" onclick="closeModal('authModal');return false;" style="font-size:12px;color:var(--text-dim);text-decoration:none">Продолжить без входа (только на этом устройстве)</a>
+    </div>
+  </div>
+</div>
+
 <!-- PROJECT MODAL -->
 <div class="modal-overlay" id="projModal">
   <div class="modal">
@@ -430,6 +451,9 @@ const NOTE_COLORS = ['#7c6aff','#f472b6','#fb923c','#34d399','#60a5fa','#a78bfa'
 
 let db = null;
 let fbAvailable = false;
+let authInstance = null;
+let authFns = null;
+let authMode = 'login';
 let curView = 'tasks';
 let curTask = null;
 let curNote = null;
@@ -443,7 +467,9 @@ let calDay = null;
 // State
 let S = { projects: [], tasks: [], subtasks: [], notes: [], activeProject: 'all' };
 
-// UID — set after Firebase Anonymous Auth resolves (see initFirebase)
+// UID — set after email/password sign-in resolves (see initFirebase / onAuthStateChanged).
+// Using a real account (not anonymous auth) is what lets the same data show up
+// on every device: anonymous auth issues a fresh, device-local uid each time.
 let UID = null;
 
 // ========== LOCAL STORAGE ==========
@@ -471,19 +497,18 @@ function loadFirebaseConfig() {
 
 async function initFirebase() {
   const cfg = loadFirebaseConfig();
-  
+
   try {
     const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js');
     const { getFirestore, collection, doc, setDoc, getDocs, deleteDoc, query, where } =
       await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js');
-    const { getAuth, signInAnonymously } =
+    const { getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut } =
       await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js');
 
     const app = initializeApp(cfg);
     db = getFirestore(app);
-    const auth = getAuth(app);
-    const cred = await signInAnonymously(auth);
-    UID = cred.user.uid;
+    authInstance = getAuth(app);
+    authFns = { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut };
 
     // Attach methods to db for use elsewhere
     db._col = (name) => collection(db, name);
@@ -494,11 +519,22 @@ async function initFirebase() {
     db._query = query;
     db._where = where;
 
-    fbAvailable = true;
-    ss('syncing');
-    await syncFromFirebase();
-    ss('synced');
-    toast('Синхронизировано!');
+    onAuthStateChanged(authInstance, async (user) => {
+      document.getElementById('signOutBtn').style.display = user ? 'flex' : 'none';
+      if (user) {
+        UID = user.uid;
+        fbAvailable = true;
+        closeModal('authModal');
+        ss('syncing');
+        try { await syncFromFirebase(); ss('synced'); toast('Синхронизировано!'); }
+        catch(e) { ss('pending'); toast('Ошибка: ' + e.message); }
+      } else {
+        UID = null;
+        fbAvailable = false;
+        ss('pending');
+        openModal('authModal');
+      }
+    });
   } catch(e) {
     console.error('Firebase init error:', e);
     ss('pending');
@@ -506,7 +542,52 @@ async function initFirebase() {
   }
 }
 
-function showConfigBanner() { /* not needed */ }
+// ========== AUTH (email + пароль — общий аккаунт на всех устройствах) ==========
+function authErrorMessage(e) {
+  const map = {
+    'auth/invalid-email': 'Некорректный email',
+    'auth/user-not-found': 'Пользователь не найден',
+    'auth/wrong-password': 'Неверный пароль',
+    'auth/invalid-credential': 'Неверный email или пароль',
+    'auth/email-already-in-use': 'Этот email уже зарегистрирован',
+    'auth/weak-password': 'Пароль слишком короткий (мин. 6 символов)',
+    'auth/too-many-requests': 'Слишком много попыток, попробуй позже',
+    'auth/network-request-failed': 'Проблема с сетью, попробуй ещё раз',
+  };
+  return map[e.code] || ('Ошибка: ' + (e.message || e.code || 'неизвестная'));
+}
+
+window.toggleAuthMode = function() {
+  authMode = authMode === 'login' ? 'register' : 'login';
+  document.getElementById('authTitle').textContent = authMode==='login' ? 'Вход' : 'Регистрация';
+  document.getElementById('authSubmitBtn').textContent = authMode==='login' ? 'Войти' : 'Создать аккаунт';
+  document.getElementById('authToggleText').textContent = authMode==='login' ? 'Нет аккаунта?' : 'Уже есть аккаунт?';
+  document.getElementById('authToggleLink').textContent = authMode==='login' ? 'Зарегистрироваться' : 'Войти';
+  document.getElementById('authError').style.display = 'none';
+};
+
+window.authSubmit = async function() {
+  const email = document.getElementById('authEmail').value.trim();
+  const password = document.getElementById('authPassword').value;
+  const errEl = document.getElementById('authError');
+  errEl.style.display = 'none';
+  if (!email || !password) { errEl.textContent = 'Заполни email и пароль'; errEl.style.display = 'block'; return; }
+  const btn = document.getElementById('authSubmitBtn'); btn.disabled = true;
+  try {
+    if (authMode === 'login') await authFns.signInWithEmailAndPassword(authInstance, email, password);
+    else await authFns.createUserWithEmailAndPassword(authInstance, email, password);
+  } catch(e) {
+    errEl.textContent = authErrorMessage(e);
+    errEl.style.display = 'block';
+  }
+  btn.disabled = false;
+};
+
+window.authSignOut = async function() {
+  if (!authInstance) return;
+  await authFns.signOut(authInstance);
+  toast('Вышли из аккаунта');
+};
 
 // ========== FIREBASE CRUD ==========
 async function fbSet(colName, id, data) {
@@ -573,7 +654,7 @@ async function createDefaultProjects() {
 }
 
 async function syncNow() {
-  if (!fbAvailable) { showConfigBanner(); return; }
+  if (!UID) { openModal('authModal'); return; }
   ss('syncing');
   try { await syncFromFirebase(); ss('synced'); toast('Синхронизировано!'); }
   catch(e) { ss('pending'); toast('Ошибка: ' + e.message); }
@@ -598,7 +679,7 @@ function ss(s) {
   b.className = 'sync-btn ' + s;
   if (s==='synced') l.textContent = 'Синхронизировано';
   else if (s==='syncing') l.textContent = 'Синхронизация...';
-  else l.textContent = fbAvailable ? 'Не синхронизировано' : 'Настрой Firebase';
+  else l.textContent = UID ? 'Не синхронизировано' : 'Войти для синхронизации';
 }
 
 // ========== UTILS ==========
