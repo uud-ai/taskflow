@@ -425,7 +425,6 @@
 
 <script type="module">
 // ========== FIREBASE ==========
-const PARSE_TASK_URL = '/api/parse-task';
 const COLORS = ['#7c6aff','#f472b6','#fb923c','#34d399','#60a5fa','#a78bfa','#f87171','#fbbf24'];
 const NOTE_COLORS = ['#7c6aff','#f472b6','#fb923c','#34d399','#60a5fa','#a78bfa'];
 
@@ -1029,22 +1028,107 @@ function closeNote() {
   curNote = null; renderNotes();
 }
 
-// ========== AI ==========
+// ========== AI (локальный парсер, без внешнего API) ==========
+// \b в JS-regex не распознаёт кириллицу как "словесные" символы, поэтому
+// границы слов для русского текста считаем вручную через \p{L}/\p{N}.
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function fmtDate(d) { return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+const WORDCHARS = '\\p{L}\\p{N}_';
+function wb(inner) { return new RegExp('(?<![' + WORDCHARS + '])(?:' + inner + ')(?![' + WORDCHARS + '])', 'iu'); }
+
+function parseTaskLocal(text, today) {
+  const removals = [];
+  const result = { date: null, time: null, project: null, priority: null };
+
+  if (/не\s*срочно|как-нибудь|не\s*горит|низкий приоритет/i.test(text)) {
+    result.priority = 'low';
+    removals.push(/не\s*срочно|как-нибудь|не\s*горит|низкий приоритет/i);
+  } else if (/срочно|важно|критично|высокий приоритет/i.test(text)) {
+    result.priority = 'high';
+    removals.push(/срочно|важно|критично|высокий приоритет/i);
+  }
+
+  let m = text.match(/\b([01]?\d|2[0-3])[:.]([0-5]\d)\b/);
+  if (m) {
+    result.time = String(m[1]).padStart(2,'0') + ':' + m[2];
+    removals.push(new RegExp('(?:в|к)\\s*' + escapeRe(m[0]) + '|' + escapeRe(m[0])));
+  } else {
+    m = text.match(/(\d{1,2})\s*(?:час(?:а|ов)?)?\s*(утра|дня|вечера|ночи)/i);
+    if (m) {
+      let h = parseInt(m[1], 10);
+      const p = m[2].toLowerCase();
+      if ((p === 'дня' || p === 'вечера') && h <= 11) h += 12;
+      else if (p === 'ночи' && h === 12) h = 0;
+      result.time = String(h).padStart(2,'0') + ':00';
+      removals.push(new RegExp('(?:в|к)\\s*' + escapeRe(m[0]) + '|' + escapeRe(m[0]), 'i'));
+    }
+  }
+
+  const WEEKDAYS = [
+    ['воскресень', ['е','я','ем','и'], 0],
+    ['понедельник', ['','а','е','ом','у'], 1],
+    ['вторник', ['','а','е','ом'], 2],
+    ['сред', ['а','у','е','ой','ы'], 3],
+    ['четверг', ['','а','е','ом'], 4],
+    ['пятниц', ['а','у','е','ей','ы'], 5],
+    ['суббот', ['а','у','е','ой','ы'], 6],
+  ];
+  if (wb('послезавтра').test(text)) {
+    const d = new Date(today); d.setDate(d.getDate()+2); result.date = fmtDate(d);
+    removals.push(wb('послезавтра'));
+  } else if (wb('завтра').test(text)) {
+    const d = new Date(today); d.setDate(d.getDate()+1); result.date = fmtDate(d);
+    removals.push(wb('завтра'));
+  } else if (wb('сегодня').test(text)) {
+    result.date = fmtDate(today);
+    removals.push(wb('сегодня'));
+  } else {
+    const wm = text.match(/через\s+(\d+)\s+д(?:ень|ня|ней)/i);
+    if (wm) {
+      const d = new Date(today); d.setDate(d.getDate()+parseInt(wm[1],10)); result.date = fmtDate(d);
+      removals.push(new RegExp(escapeRe(wm[0]), 'i'));
+    } else if (/через\s+недел/i.test(text)) {
+      const d = new Date(today); d.setDate(d.getDate()+7); result.date = fmtDate(d);
+      removals.push(/через\s+недел\w*/i);
+    } else {
+      for (const [stem, endings, idx] of WEEKDAYS) {
+        const re = wb('(?:в\\s+)?' + stem + '(?:' + endings.join('|') + ')');
+        if (re.test(text)) {
+          let diff = (idx - today.getDay() + 7) % 7;
+          if (diff === 0) diff = 7;
+          const d = new Date(today); d.setDate(d.getDate()+diff); result.date = fmtDate(d);
+          removals.push(re);
+          break;
+        }
+      }
+    }
+  }
+
+  for (const p of S.projects) {
+    const re = wb(escapeRe(p.name));
+    if (re.test(text)) { result.project = p.name; removals.push(re); break; }
+  }
+
+  let cleaned = text;
+  removals.forEach(re => { cleaned = cleaned.replace(re, ''); });
+  cleaned = cleaned.replace(/\s{2,}/g, ' ').replace(/^[\s,.\-]+|[\s,.\-]+$/g, '').trim();
+  cleaned = cleaned.replace(/\s+(?:по|в|к|для|на|от|до|с|у)$/i, '').trim();
+  result.title = cleaned ? cleaned[0].toUpperCase() + cleaned.slice(1) : text;
+  return result;
+}
+
 async function runAI() {
   const inp = document.getElementById('aiInput'), text = inp.value.trim(); if(!text) return;
   document.getElementById('aiThinking').classList.add('show');
   document.getElementById('aiBtn').disabled = true;
+  await new Promise(r => setTimeout(r, 300));
   try {
-    const res = await fetch(PARSE_TASK_URL, {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text, today:new Date().toLocaleDateString('ru'), projects:S.projects.map(p=>p.name)})});
-    const parsed = await res.json();
-    if (!res.ok) throw new Error(parsed.error || 'parse-task failed');
-    const proj = S.projects.find(p=>p.name.toLowerCase()===(parsed.project||'').toLowerCase()) || S.projects[0] || {id:'inbox'};
+    const parsed = parseTaskLocal(text, new Date());
+    const proj = (parsed.project && S.projects.find(p=>p.name.toLowerCase()===parsed.project.toLowerCase())) || S.projects[0] || {id:'inbox'};
     let deadline = null;
     if (parsed.date) { const d=new Date(parsed.date); if(parsed.time){const[h,m]=parsed.time.split(':');d.setHours(+h,+m,0,0);} deadline=d.getTime(); }
-    const t = {id:Date.now().toString(),title:parsed.title||text,done:false,projectId:proj.id,createdAt:Date.now(),updatedAt:Date.now(),deadline,taskTime:parsed.time||null,notes:parsed.notes||'',priority:parsed.priority||''};
-    S.tasks.unshift(t); inp.value=''; saveLocal(); renderAll(); toast('✦ AI: '+t.title);
+    const t = {id:Date.now().toString(),title:parsed.title||text,done:false,projectId:proj.id,createdAt:Date.now(),updatedAt:Date.now(),deadline,taskTime:parsed.time||null,notes:'',priority:parsed.priority||''};
+    S.tasks.unshift(t); inp.value=''; saveLocal(); renderAll(); toast('✦ '+t.title);
     await fbSet('tasks', t.id, t);
   } catch(e) {
     const t={id:Date.now().toString(),title:text,done:false,projectId:S.projects[0]?.id||'inbox',createdAt:Date.now(),updatedAt:Date.now(),deadline:null,taskTime:null,notes:'',priority:''};
