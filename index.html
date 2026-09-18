@@ -524,9 +524,21 @@ async function initFirebase() {
       if (user) {
         UID = user.uid;
         fbAvailable = true;
+        // The local cache (localStorage) isn't scoped per account. If it
+        // belongs to a different uid (a previous account, or unsynced
+        // guest/"продолжить без входа" data), drop it instead of merging —
+        // otherwise a stranger account's cache leaks into whoever logs in
+        // next on this device/browser.
+        if (localStorage.getItem('tf_data_uid') !== UID) {
+          S.projects = []; S.tasks = []; S.subtasks = []; S.notes = [];
+        }
         closeModal('authModal');
         ss('syncing');
-        try { await syncFromFirebase(); ss('synced'); toast('Синхронизировано!'); }
+        try {
+          await syncFromFirebase();
+          localStorage.setItem('tf_data_uid', UID);
+          ss('synced'); toast('Синхронизировано!');
+        }
         catch(e) { ss('pending'); toast('Ошибка: ' + e.message); }
       } else {
         UID = null;
