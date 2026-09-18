@@ -425,7 +425,7 @@
 
 <script type="module">
 // ========== FIREBASE ==========
-const CLAUDE_URL = 'https://api.anthropic.com/v1/messages';
+const PARSE_TASK_URL = '/api/parse-task';
 const COLORS = ['#7c6aff','#f472b6','#fb923c','#34d399','#60a5fa','#a78bfa','#f87171','#fbbf24'];
 const NOTE_COLORS = ['#7c6aff','#f472b6','#fb923c','#34d399','#60a5fa','#a78bfa'];
 
@@ -444,9 +444,8 @@ let calDay = null;
 // State
 let S = { projects: [], tasks: [], subtasks: [], notes: [], activeProject: 'all' };
 
-// UID
-let UID = localStorage.getItem('tf_uid') || ('u_' + Math.random().toString(36).slice(2,10));
-localStorage.setItem('tf_uid', UID);
+// UID — set after Firebase Anonymous Auth resolves (see initFirebase)
+let UID = null;
 
 // ========== LOCAL STORAGE ==========
 function saveLocal() {
@@ -476,12 +475,17 @@ async function initFirebase() {
   
   try {
     const { initializeApp } = await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js');
-    const { getFirestore, collection, doc, setDoc, getDocs, deleteDoc, query, where } = 
+    const { getFirestore, collection, doc, setDoc, getDocs, deleteDoc, query, where } =
       await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js');
-    
+    const { getAuth, signInAnonymously } =
+      await import('https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js');
+
     const app = initializeApp(cfg);
     db = getFirestore(app);
-    
+    const auth = getAuth(app);
+    const cred = await signInAnonymously(auth);
+    UID = cred.user.uid;
+
     // Attach methods to db for use elsewhere
     db._col = (name) => collection(db, name);
     db._setDoc = setDoc;
@@ -490,7 +494,7 @@ async function initFirebase() {
     db._deleteDoc = deleteDoc;
     db._query = query;
     db._where = where;
-    
+
     fbAvailable = true;
     ss('syncing');
     await syncFromFirebase();
@@ -525,16 +529,36 @@ async function fbGetAll(colName) {
   } catch(e) { console.error('fbGetAll:', e); return []; }
 }
 
+// Last-write-wins merge by id: keeps whichever side (local/remote) was
+// updated more recently, and unions ids so unsynced local edits/creations
+// survive a sync instead of being clobbered by a full overwrite.
+function mergeById(local, remote) {
+  const map = new Map();
+  local.forEach(item => map.set(item.id, item));
+  remote.forEach(item => {
+    const existing = map.get(item.id);
+    const remoteTs = item.updatedAt || item.createdAt || 0;
+    const localTs = existing ? (existing.updatedAt || existing.createdAt || 0) : -1;
+    if (!existing || remoteTs >= localTs) map.set(item.id, item);
+  });
+  return Array.from(map.values());
+}
+
 async function syncFromFirebase() {
   const [projects, tasks, subtasks, notes] = await Promise.all([
     fbGetAll('projects'), fbGetAll('tasks'), fbGetAll('subtasks'), fbGetAll('notes')
   ]);
-  
-  if (projects.length) S.projects = projects.map(p => ({ id:p.id, name:p.name, color:p.color }));
-  if (tasks.length) S.tasks = tasks.map(t => ({ id:t.id, title:t.title, done:t.done||false, projectId:t.projectId||'', deadline:t.deadline||null, taskTime:t.taskTime||null, notes:t.notes||'', priority:t.priority||'', createdAt:t.createdAt||Date.now() }));
-  if (subtasks.length) S.subtasks = subtasks.map(s => ({ id:s.id, taskId:s.taskId, title:s.title, done:s.done||false }));
-  if (notes.length) S.notes = notes.map(n => ({ id:n.id, title:n.title||'', body:n.body||'', color:n.color||NOTE_COLORS[0], createdAt:n.createdAt||Date.now(), updatedAt:n.updatedAt||Date.now() }));
-  
+
+  const remoteProjects = projects.map(p => ({ id:p.id, name:p.name, color:p.color, updatedAt:p.updatedAt||0 }));
+  const remoteTasks = tasks.map(t => ({ id:t.id, title:t.title, done:t.done||false, projectId:t.projectId||'', deadline:t.deadline||null, taskTime:t.taskTime||null, notes:t.notes||'', priority:t.priority||'', recur:t.recur||'', createdAt:t.createdAt||Date.now(), updatedAt:t.updatedAt||t.createdAt||0 }));
+  const remoteSubtasks = subtasks.map(s => ({ id:s.id, taskId:s.taskId, title:s.title, done:s.done||false, updatedAt:s.updatedAt||0 }));
+  const remoteNotes = notes.map(n => ({ id:n.id, title:n.title||'', body:n.body||'', color:n.color||NOTE_COLORS[0], createdAt:n.createdAt||Date.now(), updatedAt:n.updatedAt||Date.now() }));
+
+  S.projects = mergeById(S.projects, remoteProjects);
+  S.tasks = mergeById(S.tasks, remoteTasks);
+  S.subtasks = mergeById(S.subtasks, remoteSubtasks);
+  S.notes = mergeById(S.notes, remoteNotes);
+
   if (!S.projects.length) await createDefaultProjects();
   checkRecurring(); saveLocal(); renderAll();
 }
@@ -632,7 +656,7 @@ function renderColors() {
 async function saveProject() {
   const name = document.getElementById('projName').value.trim();
   if (!name) return;
-  const p = { id: Date.now().toString(), name, color: selColor };
+  const p = { id: Date.now().toString(), name, color: selColor, updatedAt: Date.now() };
   S.projects.push(p); saveLocal(); renderAll();
   closeModal('projModal'); document.getElementById('projName').value = '';
   await fbSet('projects', p.id, p);
@@ -644,7 +668,7 @@ async function addTask() {
   const inp = document.getElementById('newTaskInp'), title = inp.value.trim();
   if (!title) return;
   const pid = S.activeProject==='all' ? (S.projects[0]?.id||'inbox') : S.activeProject;
-  const t = { id: Date.now().toString(), title, done: false, projectId: pid, createdAt: Date.now(), deadline: null, taskTime: null, notes: '', priority: '' };
+  const t = { id: Date.now().toString(), title, done: false, projectId: pid, createdAt: Date.now(), updatedAt: Date.now(), deadline: null, taskTime: null, notes: '', priority: '' };
   S.tasks.unshift(t); inp.value = ''; saveLocal(); renderAll();
   await fbSet('tasks', t.id, t);
 }
@@ -652,7 +676,7 @@ async function addTask() {
 async function toggleTask(id, e) {
   if (e) e.stopPropagation();
   const t = S.tasks.find(x=>x.id===id); if (!t) return;
-  t.done = !t.done; saveLocal(); renderAll();
+  t.done = !t.done; t.updatedAt = Date.now(); saveLocal(); renderAll();
   await fbSet('tasks', t.id, t);
 }
 
@@ -704,6 +728,7 @@ async function saveDetail() {
   const tv = document.getElementById('detailTime').value;
   if (dv) { const d = new Date(dv); if(tv){const[h,m]=tv.split(':');d.setHours(+h,+m,0,0);} t.deadline=d.getTime(); } else t.deadline=null;
   t.taskTime = tv || null;
+  t.updatedAt = Date.now();
   saveLocal(); renderAll();
   await fbSet('tasks', t.id, t);
 }
@@ -727,7 +752,7 @@ window.setRecur = function(r) {
 
 async function toggleDetailCheck() {
   const t = S.tasks.find(x=>x.id===curTask); if (!t) return;
-  t.done = !t.done;
+  t.done = !t.done; t.updatedAt = Date.now();
   const p = gp(t.projectId), dc = document.getElementById('detailCheck');
   dc.className = 'detail-check' + (t.done?' done':'');
   dc.style.background = t.done ? p.color : 'transparent';
@@ -811,7 +836,7 @@ function renderSubs() {
     const cb = document.createElement('div'); cb.className = 'sub-cb' + (s.done?' done-cb':'');
     cb.style.borderColor = '#7c6aff'; cb.style.background = s.done ? '#7c6aff' : 'transparent';
     cb.innerHTML = `<span class="sub-cb-inner" style="color:#fff">✓</span>`;
-    cb.onclick = async () => { s.done=!s.done; renderSubs(); saveLocal(); await fbSet('subtasks',s.id,s); };
+    cb.onclick = async () => { s.done=!s.done; s.updatedAt=Date.now(); renderSubs(); saveLocal(); await fbSet('subtasks',s.id,s); };
     const tx = document.createElement('div'); tx.className = 'sub-text'+(s.done?' done-t':''); tx.textContent = s.title;
     const dl = document.createElement('button'); dl.className = 'sub-del'; dl.textContent = '✕';
     dl.onclick = async () => { S.subtasks=S.subtasks.filter(x=>x.id!==s.id); renderSubs(); saveLocal(); await fbDel('subtasks',s.id); };
@@ -820,7 +845,7 @@ function renderSubs() {
 }
 async function addSub() {
   const inp = document.getElementById('subInp'), title = inp.value.trim(); if(!title) return;
-  const s = { id: Date.now().toString(), taskId: curTask, title, done: false };
+  const s = { id: Date.now().toString(), taskId: curTask, title, done: false, updatedAt: Date.now() };
   S.subtasks.push(s); inp.value = ''; renderSubs(); saveLocal();
   await fbSet('subtasks', s.id, s);
 }
@@ -932,14 +957,14 @@ async function calAddTask() {
   let deadline;
   if(tv){const[h,m]=tv.split(':');deadline=new Date(calDay.getFullYear(),calDay.getMonth(),calDay.getDate(),+h,+m).getTime();}
   else deadline=new Date(calDay.getFullYear(),calDay.getMonth(),calDay.getDate()).getTime();
-  const t={id:Date.now().toString(),title,done:false,projectId:pid,createdAt:Date.now(),deadline,taskTime:tv||null,notes:'',priority:''};
+  const t={id:Date.now().toString(),title,done:false,projectId:pid,createdAt:Date.now(),updatedAt:Date.now(),deadline,taskTime:tv||null,notes:'',priority:''};
   S.tasks.unshift(t); ti.value=''; saveLocal(); renderCal(); toast('Задача добавлена!');
   await fbSet('tasks',t.id,t);
 }
 
 async function calToggle(id) {
   const t = S.tasks.find(x=>x.id===id); if(!t) return;
-  t.done=!t.done; saveLocal(); renderCalPanel();
+  t.done=!t.done; t.updatedAt=Date.now(); saveLocal(); renderCalPanel();
   await fbSet('tasks',t.id,t);
 }
 window.calToggle = calToggle;
@@ -1010,20 +1035,19 @@ async function runAI() {
   document.getElementById('aiThinking').classList.add('show');
   document.getElementById('aiBtn').disabled = true;
   try {
-    const res = await fetch(CLAUDE_URL, {method:'POST',
+    const res = await fetch(PARSE_TASK_URL, {method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:400,
-        messages:[{role:'user',content:`Parse this Russian task: "${text}". Today is ${new Date().toLocaleDateString('ru')}. Projects: ${S.projects.map(p=>p.name).join(', ')}. Return ONLY JSON: {"title":"...","date":"YYYY-MM-DD or null","time":"HH:MM or null","project":"name or null","priority":"high|med|low or null","notes":"extra or null"}`}]})});
-    const data = await res.json();
-    const parsed = JSON.parse(data.content[0].text.replace(/```json|```/g,'').trim());
+      body:JSON.stringify({text, today:new Date().toLocaleDateString('ru'), projects:S.projects.map(p=>p.name)})});
+    const parsed = await res.json();
+    if (!res.ok) throw new Error(parsed.error || 'parse-task failed');
     const proj = S.projects.find(p=>p.name.toLowerCase()===(parsed.project||'').toLowerCase()) || S.projects[0] || {id:'inbox'};
     let deadline = null;
     if (parsed.date) { const d=new Date(parsed.date); if(parsed.time){const[h,m]=parsed.time.split(':');d.setHours(+h,+m,0,0);} deadline=d.getTime(); }
-    const t = {id:Date.now().toString(),title:parsed.title||text,done:false,projectId:proj.id,createdAt:Date.now(),deadline,taskTime:parsed.time||null,notes:parsed.notes||'',priority:parsed.priority||''};
+    const t = {id:Date.now().toString(),title:parsed.title||text,done:false,projectId:proj.id,createdAt:Date.now(),updatedAt:Date.now(),deadline,taskTime:parsed.time||null,notes:parsed.notes||'',priority:parsed.priority||''};
     S.tasks.unshift(t); inp.value=''; saveLocal(); renderAll(); toast('✦ AI: '+t.title);
     await fbSet('tasks', t.id, t);
   } catch(e) {
-    const t={id:Date.now().toString(),title:text,done:false,projectId:S.projects[0]?.id||'inbox',createdAt:Date.now(),deadline:null,taskTime:null,notes:'',priority:''};
+    const t={id:Date.now().toString(),title:text,done:false,projectId:S.projects[0]?.id||'inbox',createdAt:Date.now(),updatedAt:Date.now(),deadline:null,taskTime:null,notes:'',priority:''};
     S.tasks.unshift(t); inp.value=''; saveLocal(); renderAll(); toast('Задача добавлена');
     await fbSet('tasks', t.id, t);
   }
@@ -1092,7 +1116,7 @@ function checkRecurring() {
     else if (t.recur==='monthly') next.setMonth(next.getMonth()+1);
     if (next <= today && !S.tasks.find(x => x.title===t.title && !x.done && x.recur===t.recur)) {
       const nt = {id:Date.now().toString()+'r',title:t.title,done:false,projectId:t.projectId,
-        createdAt:Date.now(),deadline:next.getTime(),taskTime:t.taskTime,notes:t.notes,
+        createdAt:Date.now(),updatedAt:Date.now(),deadline:next.getTime(),taskTime:t.taskTime,notes:t.notes,
         priority:t.priority,recur:t.recur};
       S.tasks.unshift(nt); fbSet('tasks', nt.id, nt);
     }
