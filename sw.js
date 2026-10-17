@@ -1,5 +1,7 @@
-const CACHE = 'taskflow-v1';
-const ASSETS = ['/', '/index.html'];
+// chisle: bump this on every deploy so the activate handler evicts the old
+// cache — otherwise users offline during a deploy keep serving a stale shell.
+const CACHE = 'taskflow-v2';
+const ASSETS = ['/', '/index.html', '/style.css', '/app.js'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));

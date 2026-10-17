@@ -2,7 +2,7 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     // Applies to projects, tasks, subtasks, notes — every doc carries a "uid"
-    // field set by the client to the signed-in Firebase Anonymous Auth user.
+    // field set by the client to the signed-in Firebase Auth user (email/password).
     match /{collection}/{docId} {
       allow read, update, delete: if request.auth != null
         && request.auth.uid == resource.data.uid;
