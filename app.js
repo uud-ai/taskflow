@@ -281,10 +281,13 @@ function ss(s) {
 }
 
 // ========== UTILS ==========
+let toastTimer;
 function toast(msg) {
   const t = document.getElementById('toast');
-  t.textContent = msg; t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 3000);
+  t.textContent = msg;
+  t.togglePopover(true);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.hidePopover(), 3000);
 }
 function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function gp(id) { return S.projects.find(p=>p.id===id) || { name:'Входящие', color:'#7c6aff' }; }
