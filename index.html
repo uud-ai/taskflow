@@ -11,6 +11,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes"/>
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
 <title>TaskFlow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link rel="preconnect" href="https://www.gstatic.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@700;800;900&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <link rel="stylesheet" href="style.css"/>
 </head>
@@ -104,7 +107,7 @@
 </div>
 
 <!-- AUTH MODAL -->
-<div class="modal-overlay" id="authModal">
+<dialog class="modal-overlay" id="authModal">
   <div class="modal">
     <div class="modal-title" id="authTitle">Вход</div>
     <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px;line-height:1.5">Один аккаунт — одинаковый список задач на всех устройствах.</p>
@@ -121,10 +124,10 @@
       <a href="#" onclick="closeModal('authModal');return false;" style="font-size:12px;color:var(--text-dim);text-decoration:none">Продолжить без входа (только на этом устройстве)</a>
     </div>
   </div>
-</div>
+</dialog>
 
 <!-- PROJECT MODAL -->
-<div class="modal-overlay" id="projModal">
+<dialog class="modal-overlay" id="projModal">
   <div class="modal">
     <div class="modal-title">Новый проект</div>
     <div class="modal-field"><div class="modal-label">Название</div><input class="modal-input" id="projName" placeholder="Мой проект..." /></div>
@@ -134,10 +137,10 @@
       <button class="btn-primary" onclick="saveProject()">Создать</button>
     </div>
   </div>
-</div>
+</dialog>
 
 <!-- TASK DETAIL MODAL -->
-<div class="modal-overlay" id="detailModal">
+<dialog class="modal-overlay" id="detailModal">
   <div class="modal">
     <div class="detail-header">
       <div class="detail-check" id="detailCheck"><span class="detail-check-inner">✓</span></div>
@@ -181,7 +184,7 @@
       <button class="btn-primary" onclick="saveDetail();closeModal('detailModal');toast('Сохранено!')">💾 Сохранить</button>
     </div>
   </div>
-</div>
+</dialog>
 
 <nav class="bottom-nav">
   <button class="nav-item active" id="navTasks" onclick="setView('tasks')"><div class="nav-icon">✓</div><span>Задачи</span></button>

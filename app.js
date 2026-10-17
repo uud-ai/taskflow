@@ -297,8 +297,8 @@ function fmtAgo(ts) {
   if (diff < 86400000) return Math.floor(diff/3600000) + 'ч назад';
   return new Date(ts).toLocaleDateString('ru', {day:'numeric',month:'short'});
 }
-function closeModal(id) { document.getElementById(id).classList.remove('open'); }
-function openModal(id) { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).close(); }
+function openModal(id) { document.getElementById(id).showModal(); }
 window.closeModal = closeModal;
 window.openModal = openModal;
 
@@ -847,6 +847,9 @@ document.getElementById('calPrev').onclick = () => { calDate=new Date(calDate.ge
 document.getElementById('calNext').onclick = () => { calDate=new Date(calDate.getFullYear(),calDate.getMonth()+1,1);renderCal(); };
 document.getElementById('projModal').onclick = e => { if(e.target.id==='projModal') closeModal('projModal'); };
 document.getElementById('detailModal').onclick = e => { if(e.target.id==='detailModal'){saveDetail();closeModal('detailModal');} };
+// native <dialog> closes on Escape (fires 'cancel') for free — save first so
+// an unsaved priority/recur toggle isn't silently discarded.
+document.getElementById('detailModal').addEventListener('cancel', saveDetail);
 document.getElementById('detailCheck').onclick = toggleDetailCheck;
 document.getElementById('detailTitle').onblur = saveDetail;
 document.getElementById('detailNote').onblur = saveDetail;
